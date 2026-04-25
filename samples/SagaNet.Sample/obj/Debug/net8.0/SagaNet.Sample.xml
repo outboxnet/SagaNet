@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>SagaNet.Sample</name>
+    </assembly>
+    <members>
+        <member name="T:SagaNet.Sample.Workflows.OrderWorkflow">
+             <summary>
+             Demonstrates a full e-commerce order saga with compensation.
+            
+             Happy path:  ValidateOrder → ReserveInventory → ProcessPayment → ShipOrder
+             On failure:  Compensation runs in reverse: RefundPayment → ReleaseInventory
+             </summary>
+        </member>
+    </members>
+</doc>

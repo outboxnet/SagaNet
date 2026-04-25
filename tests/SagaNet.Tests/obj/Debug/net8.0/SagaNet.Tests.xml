@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>SagaNet.Tests</name>
+    </assembly>
+    <members>
+        <member name="M:SagaNet.Tests.Engine.SagaCompensatorTests.CompensateAsync_CompensatesAllCompletedStepsInReverseOrder">
+            <summary>
+            After the builder wires OrderWorkflow, the forward-flow indices are:
+            0=ValidateOrder, 1=ReserveInventory, 2=Compensate:RI, 3=ProcessPayment, 4=Compensate:PP, 5=ShipOrder.
+            This test marks steps 1 (RI) and 3 (PP) as Complete and expects both to be compensated.
+            </summary>
+        </member>
+        <member name="T:SagaNet.Tests.Helpers.InMemoryWorkflowRepository">
+            <summary>Thread-safe in-memory repository for unit tests.</summary>
+        </member>
+        <member name="P:SagaNet.Tests.Helpers.OrderData.SimulatePaymentFailure">
+            <summary>Set to true in test data to trigger payment failure.</summary>
+        </member>
+        <member name="T:SagaNet.Tests.Helpers.OrderWorkflow">
+            <summary>
+            Forward flow: ValidateOrder(0) → ReserveInventory(1) → [Compensate:RI(2)] → ProcessPayment(3) → [Compensate:PP(4)] → ShipOrder(5)
+            </summary>
+        </member>
+    </members>
+</doc>

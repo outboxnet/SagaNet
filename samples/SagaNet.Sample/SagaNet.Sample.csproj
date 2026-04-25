@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SagaNet.Core\SagaNet.Core.csproj" />
+    <ProjectReference Include="..\..\src\SagaNet.Persistence.EfCore\SagaNet.Persistence.EfCore.csproj" />
+    <ProjectReference Include="..\..\src\SagaNet.Extensions.DependencyInjection\SagaNet.Extensions.DependencyInjection.csproj" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" />
+  </ItemGroup>
+
+</Project>
