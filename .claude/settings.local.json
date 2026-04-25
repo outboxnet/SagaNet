@@ -15,7 +15,10 @@
       "Bash(git -C D:/SagaNet commit -m ':*)",
       "Bash(git -C \"D:/SagaNet\" log --oneline -3)",
       "Bash(git -C \"D:/SagaNet\" add README.md)",
-      "Bash(git -C D:/SagaNet commit -m 'docs: add beginner-friendly README covering workflows, sagas, and usage:*)"
+      "Bash(git -C D:/SagaNet commit -m 'docs: add beginner-friendly README covering workflows, sagas, and usage:*)",
+      "Bash(dotnet ef:*)",
+      "Bash(git -C D:/SagaNet add src/SagaNet.Core/Engine/WorkflowHost.cs src/SagaNet.Extensions.DependencyInjection/ServiceCollectionExtensions.cs src/SagaNet.Persistence.EfCore/SagaNetDbContextFactory.cs src/SagaNet.Persistence.EfCore/Migrations/ src/SagaNet.Persistence.EfCore/SagaNet.Persistence.EfCore.csproj samples/SagaNet.Sample/SagaNet.Sample.csproj)",
+      "Bash(git -C D:/SagaNet commit -m 'fix: resolve Singleton/Scoped DI conflict and add EF migrations:*)"
     ]
   }
 }
