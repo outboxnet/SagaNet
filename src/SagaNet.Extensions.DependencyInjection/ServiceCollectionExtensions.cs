@@ -36,40 +36,40 @@ public static class ServiceCollectionExtensions
         services.AddOptions<WorkflowOptions>()
             .BindConfiguration(WorkflowOptions.SectionName);
 
-        // Core services
+        // Singletons — safe to share across requests and the background host.
         services.TryAddSingleton<IWorkflowRegistry>(sp =>
         {
             var registry = new WorkflowRegistry(sp);
-            var registrations = sp.GetServices<WorkflowRegistration>();
-
-            foreach (var reg in registrations)
+            foreach (var reg in sp.GetServices<WorkflowRegistration>())
             {
-                var method = typeof(IWorkflowRegistry)
+                typeof(IWorkflowRegistry)
                     .GetMethod(nameof(IWorkflowRegistry.Register))!
-                    .MakeGenericMethod(reg.WorkflowType, reg.DataType);
-                method.Invoke(registry, null);
+                    .MakeGenericMethod(reg.WorkflowType, reg.DataType)
+                    .Invoke(registry, null);
             }
-
             return registry;
         });
 
         services.TryAddSingleton<IEventBroker, InMemoryEventBroker>();
 
-        // Engine internals
-        services.TryAddTransient<StepExecutor>();
-        services.TryAddTransient<SagaCompensator>();
-        services.TryAddTransient<WorkflowExecutor>();
+        // Engine internals — registered as Scoped so each per-execution DI scope
+        // (created by WorkflowHost via IServiceScopeFactory) gets a fresh set that
+        // shares the same scoped IWorkflowRepository / DbContext.
+        services.TryAddScoped<StepExecutor>();
+        services.TryAddScoped<SagaCompensator>();
+        services.TryAddScoped<WorkflowExecutor>();
 
-        // Built-in middleware (order matters — ObservabilityMiddleware should wrap RetryMiddleware)
-        services.AddTransient<IWorkflowMiddleware, ObservabilityMiddleware>();
-        services.AddTransient<IWorkflowMiddleware, RetryMiddleware>();
+        // Built-in middleware (order: ObservabilityMiddleware wraps RetryMiddleware).
+        services.AddScoped<IWorkflowMiddleware, ObservabilityMiddleware>();
+        services.AddScoped<IWorkflowMiddleware, RetryMiddleware>();
 
-        // WorkflowHost acts as both IHostedService and IWorkflowHost
+        // WorkflowHost is a Singleton IHostedService. It uses IServiceScopeFactory
+        // internally so it never directly holds any scoped dependency.
         services.TryAddSingleton<WorkflowHost>();
         services.TryAddSingleton<IWorkflowHost>(sp => sp.GetRequiredService<WorkflowHost>());
         services.AddHostedService(sp => sp.GetRequiredService<WorkflowHost>());
 
-        // Apply builder configuration
+        // Apply builder configuration.
         var builder = new SagaNetBuilder(services);
         configure?.Invoke(builder);
 
@@ -77,7 +77,7 @@ public static class ServiceCollectionExtensions
     }
 
     /// <summary>
-    /// Adds SagaNet health checks: reports Healthy when the host is running.
+    /// Adds a SagaNet health check that reports Healthy when the host is running.
     /// </summary>
     public static IHealthChecksBuilder AddSagaNetHealthCheck(
         this IHealthChecksBuilder builder,

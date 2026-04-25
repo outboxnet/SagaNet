@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -11,13 +12,14 @@ namespace SagaNet.Core.Engine;
 /// <summary>
 /// <see cref="IHostedService"/> that continuously polls for runnable workflow instances
 /// and dispatches them to <see cref="WorkflowExecutor"/> with configurable concurrency.
-/// Also handles external event delivery to waiting workflows.
+///
+/// Uses <see cref="IServiceScopeFactory"/> so that each execution gets its own DI scope,
+/// allowing scoped services such as EF Core DbContext to be used safely from this singleton.
 /// </summary>
 public sealed class WorkflowHost : BackgroundService, IWorkflowHost
 {
-    private readonly IWorkflowRepository _repository;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly IWorkflowRegistry _registry;
-    private readonly WorkflowExecutor _executor;
     private readonly IEventBroker _eventBroker;
     private readonly WorkflowOptions _options;
     private readonly ILogger<WorkflowHost> _logger;
@@ -26,16 +28,14 @@ public sealed class WorkflowHost : BackgroundService, IWorkflowHost
     private readonly Channel<Guid> _workQueue;
 
     public WorkflowHost(
-        IWorkflowRepository repository,
+        IServiceScopeFactory scopeFactory,
         IWorkflowRegistry registry,
-        WorkflowExecutor executor,
         IEventBroker eventBroker,
         IOptions<WorkflowOptions> options,
         ILogger<WorkflowHost> logger)
     {
-        _repository = repository;
+        _scopeFactory = scopeFactory;
         _registry = registry;
-        _executor = executor;
         _eventBroker = eventBroker;
         _options = options.Value;
         _logger = logger;
@@ -69,7 +69,9 @@ public sealed class WorkflowHost : BackgroundService, IWorkflowHost
             NextExecutionTime = DateTime.UtcNow
         };
 
-        instance = await _repository.CreateInstanceAsync(instance, cancellationToken);
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var repository = scope.ServiceProvider.GetRequiredService<IWorkflowRepository>();
+        instance = await repository.CreateInstanceAsync(instance, cancellationToken);
 
         SagaNetDiagnostics.WorkflowsStarted.Add(1,
             new System.Diagnostics.TagList { { "workflow", definition.Name } });
@@ -101,9 +103,11 @@ public sealed class WorkflowHost : BackgroundService, IWorkflowHost
                 : System.Text.Json.JsonSerializer.Serialize(eventData)
         };
 
-        await _repository.PublishEventAsync(@event, cancellationToken);
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var repository = scope.ServiceProvider.GetRequiredService<IWorkflowRepository>();
+        await repository.PublishEventAsync(@event, cancellationToken);
 
-        // Also notify in-process waiters.
+        // Also notify in-process waiters immediately.
         await _eventBroker.PublishAsync(eventName, eventKey, eventData, cancellationToken);
 
         _logger.LogDebug("Published event {EventName}/{EventKey}", eventName, eventKey);
@@ -113,12 +117,15 @@ public sealed class WorkflowHost : BackgroundService, IWorkflowHost
         Guid instanceId,
         CancellationToken cancellationToken = default)
     {
-        var instance = await _repository.GetInstanceAsync(instanceId, cancellationToken);
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var repository = scope.ServiceProvider.GetRequiredService<IWorkflowRepository>();
+
+        var instance = await repository.GetInstanceAsync(instanceId, cancellationToken);
         if (instance is null || instance.IsTerminal) return;
 
         instance.Status = WorkflowStatus.Terminated;
         instance.CompleteAt = DateTime.UtcNow;
-        await _repository.UpdateInstanceAsync(instance, cancellationToken);
+        await repository.UpdateInstanceAsync(instance, cancellationToken);
 
         _logger.LogInformation("Terminated workflow [{InstanceId}]", instanceId);
     }
@@ -153,7 +160,9 @@ public sealed class WorkflowHost : BackgroundService, IWorkflowHost
         {
             try
             {
-                var ids = await _repository.GetRunnableInstanceIdsAsync(_options.PollBatchSize, ct);
+                await using var scope = _scopeFactory.CreateAsyncScope();
+                var repository = scope.ServiceProvider.GetRequiredService<IWorkflowRepository>();
+                var ids = await repository.GetRunnableInstanceIdsAsync(_options.PollBatchSize, ct);
                 foreach (var id in ids)
                     _workQueue.Writer.TryWrite(id);
             }
@@ -171,7 +180,11 @@ public sealed class WorkflowHost : BackgroundService, IWorkflowHost
         {
             try
             {
-                await _executor.ExecuteAsync(instanceId, ct);
+                // Each workflow execution gets its own DI scope so that scoped services
+                // (e.g. EF Core DbContext) are properly isolated and disposed afterwards.
+                await using var scope = _scopeFactory.CreateAsyncScope();
+                var executor = scope.ServiceProvider.GetRequiredService<WorkflowExecutor>();
+                await executor.ExecuteAsync(instanceId, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
             catch (Exception ex)
@@ -188,7 +201,6 @@ public sealed class WorkflowHost : BackgroundService, IWorkflowHost
         where TWorkflow : IWorkflow<TData>
         where TData : class, new()
     {
-        // Instantiate temporarily just to get name/version.
         var wf = (IWorkflow<TData>)System.Runtime.CompilerServices.RuntimeHelpers
             .GetUninitializedObject(typeof(TWorkflow));
 
