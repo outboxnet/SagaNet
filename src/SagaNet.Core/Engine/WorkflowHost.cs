@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Threading.Channels;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -26,6 +27,12 @@ public sealed class WorkflowHost : BackgroundService, IWorkflowHost
 
     // Channel used to enqueue instance IDs discovered during polling.
     private readonly Channel<Guid> _workQueue;
+
+    // Tracks which instance IDs are currently being executed so that
+    // multiple workers never process the same instance simultaneously.
+    // This is essential when using InMemory EF Core, which doesn't enforce
+    // the RowVersion optimistic-concurrency check that SQL Server relies on.
+    private readonly ConcurrentDictionary<Guid, byte> _inFlight = new();
 
     public WorkflowHost(
         IServiceScopeFactory scopeFactory,
@@ -178,6 +185,12 @@ public sealed class WorkflowHost : BackgroundService, IWorkflowHost
     {
         await foreach (var instanceId in _workQueue.Reader.ReadAllAsync(ct))
         {
+            // Deduplicate: skip if another worker is already executing this instance.
+            // Prevents double-execution when the same ID is queued multiple times before
+            // it gets processed, or when InMemory EF Core doesn't enforce RowVersion.
+            if (!_inFlight.TryAdd(instanceId, 0))
+                continue;
+
             try
             {
                 // Each workflow execution gets its own DI scope so that scoped services
@@ -191,6 +204,10 @@ public sealed class WorkflowHost : BackgroundService, IWorkflowHost
             {
                 _logger.LogError(ex,
                     "Unhandled error processing workflow instance [{InstanceId}]", instanceId);
+            }
+            finally
+            {
+                _inFlight.TryRemove(instanceId, out _);
             }
         }
     }

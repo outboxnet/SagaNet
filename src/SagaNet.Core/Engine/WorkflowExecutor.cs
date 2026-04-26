@@ -166,9 +166,13 @@ public sealed class WorkflowExecutor
                 pointer.Status = StepStatus.Complete;
                 pointer.EndTime = DateTime.UtcNow;
 
-                // Queue successor steps.
+                // Queue successor steps (skip if a pointer already exists — defensive
+                // guard against any scenario that would produce duplicate step indices).
                 foreach (var nextIndex in stepDef.NextStepIndices)
                 {
+                    if (instance.ExecutionPointers.Any(p => p.StepIndex == nextIndex))
+                        continue;
+
                     var nextDef = definition.Steps.First(s => s.Index == nextIndex);
                     instance.ExecutionPointers.Add(new ExecutionPointer
                     {

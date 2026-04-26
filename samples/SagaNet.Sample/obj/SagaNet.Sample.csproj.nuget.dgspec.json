@@ -70,6 +70,11 @@
               "target": "Package",
               "version": "[8.0.2, )",
               "versionCentrallyManaged": true
+            },
+            "Swashbuckle.AspNetCore": {
+              "target": "Package",
+              "version": "[6.9.0, )",
+              "versionCentrallyManaged": true
             }
           },
           "centralPackageVersions": {
@@ -93,6 +98,7 @@
             "OpenTelemetry.Extensions.Hosting": "1.9.0",
             "Polly": "8.4.2",
             "Polly.Extensions": "8.4.2",
+            "Swashbuckle.AspNetCore": "6.9.0",
             "System.Diagnostics.DiagnosticSource": "8.0.1",
             "System.Text.Json": "8.0.5",
             "xunit": "2.9.2",
@@ -225,6 +231,7 @@
             "OpenTelemetry.Extensions.Hosting": "1.9.0",
             "Polly": "8.4.2",
             "Polly.Extensions": "8.4.2",
+            "Swashbuckle.AspNetCore": "6.9.0",
             "System.Diagnostics.DiagnosticSource": "8.0.1",
             "System.Text.Json": "8.0.5",
             "xunit": "2.9.2",
@@ -338,6 +345,7 @@
             "OpenTelemetry.Extensions.Hosting": "1.9.0",
             "Polly": "8.4.2",
             "Polly.Extensions": "8.4.2",
+            "Swashbuckle.AspNetCore": "6.9.0",
             "System.Diagnostics.DiagnosticSource": "8.0.1",
             "System.Text.Json": "8.0.5",
             "xunit": "2.9.2",
@@ -455,6 +463,7 @@
             "OpenTelemetry.Extensions.Hosting": "1.9.0",
             "Polly": "8.4.2",
             "Polly.Extensions": "8.4.2",
+            "Swashbuckle.AspNetCore": "6.9.0",
             "System.Diagnostics.DiagnosticSource": "8.0.1",
             "System.Text.Json": "8.0.5",
             "xunit": "2.9.2",

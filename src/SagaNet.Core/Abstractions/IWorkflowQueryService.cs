@@ -32,4 +32,40 @@ public interface IWorkflowQueryService
     Task<IReadOnlyList<WorkflowProgress>> GetRecentAsync(
         int limit = 50,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Returns all workflow instances where the named step is currently active —
+    /// i.e. its execution pointer status is Pending, Running, or WaitingForEvent.
+    /// <para>
+    /// Use this to answer: "which orders are currently stuck waiting for payment?"
+    /// </para>
+    /// </summary>
+    /// <param name="stepName">
+    /// The step name as declared in the workflow builder,
+    /// e.g. <c>"ProcessPayment"</c>.
+    /// </param>
+    /// <param name="filter">Optional extra filters (workflow type, time window, limit).</param>
+    /// <param name="ct">Cancellation token.</param>
+    Task<IReadOnlyList<WorkflowProgress>> GetStuckAtStepAsync(
+        string stepName,
+        StepQueryFilter? filter = null,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Returns all workflow instances where the named step has permanently failed
+    /// — i.e. its execution pointer status is Failed.
+    /// <para>
+    /// Use this to answer: "which orders failed at the payment step today?"
+    /// </para>
+    /// </summary>
+    /// <param name="stepName">
+    /// The step name as declared in the workflow builder,
+    /// e.g. <c>"ProcessPayment"</c>.
+    /// </param>
+    /// <param name="filter">Optional extra filters (workflow type, time window, limit).</param>
+    /// <param name="ct">Cancellation token.</param>
+    Task<IReadOnlyList<WorkflowProgress>> GetFailedAtStepAsync(
+        string stepName,
+        StepQueryFilter? filter = null,
+        CancellationToken ct = default);
 }

@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using SagaNet.Core.Abstractions;
 using SagaNet.Core.Models;
 using SagaNet.Persistence.EfCore.Entities;
+using System.Linq;
 
 namespace SagaNet.Persistence.EfCore.Queries;
 
@@ -61,6 +62,83 @@ public sealed class EfWorkflowQueryService : IWorkflowQueryService
         return entities.Select(Map).ToList();
     }
 
+    /// <inheritdoc/>
+    public async Task<IReadOnlyList<WorkflowProgress>> GetStuckAtStepAsync(
+        string stepName,
+        StepQueryFilter? filter = null,
+        CancellationToken ct = default)
+    {
+        // "Stuck at step" means the workflow has an execution pointer for that step
+        // whose status is Pending, Running, or WaitingForEvent.
+        var activeStatuses = new[]
+        {
+            (int)StepStatus.Pending,
+            (int)StepStatus.Running,
+            (int)StepStatus.WaitingForEvent
+        };
+
+        var query = _db.WorkflowInstances
+            .AsNoTracking()
+            .Include(x => x.ExecutionPointers)
+            .Where(x => x.ExecutionPointers.Any(p =>
+                p.StepName == stepName &&
+                activeStatuses.Contains(p.Status)));
+
+        query = ApplyFilter(query, filter);
+
+        var entities = await query
+            .OrderByDescending(x => x.CreatedAt)
+            .Take(filter?.Limit ?? 50)
+            .ToListAsync(ct);
+
+        return entities.Select(Map).ToList();
+    }
+
+    /// <inheritdoc/>
+    public async Task<IReadOnlyList<WorkflowProgress>> GetFailedAtStepAsync(
+        string stepName,
+        StepQueryFilter? filter = null,
+        CancellationToken ct = default)
+    {
+        // "Failed at step" means the workflow has an execution pointer for that step
+        // whose status is Failed (all retries exhausted, compensation triggered or not).
+        var query = _db.WorkflowInstances
+            .AsNoTracking()
+            .Include(x => x.ExecutionPointers)
+            .Where(x => x.ExecutionPointers.Any(p =>
+                p.StepName == stepName &&
+                p.Status == (int)StepStatus.Failed));
+
+        query = ApplyFilter(query, filter);
+
+        var entities = await query
+            .OrderByDescending(x => x.CreatedAt)
+            .Take(filter?.Limit ?? 50)
+            .ToListAsync(ct);
+
+        return entities.Select(Map).ToList();
+    }
+
+    // ── Shared filter helper ──────────────────────────────────────────────────
+
+    private static IQueryable<Entities.WorkflowInstanceEntity> ApplyFilter(
+        IQueryable<Entities.WorkflowInstanceEntity> query,
+        StepQueryFilter? filter)
+    {
+        if (filter is null) return query;
+
+        if (filter.WorkflowName is not null)
+            query = query.Where(x => x.WorkflowName == filter.WorkflowName);
+
+        if (filter.CreatedAfter is not null)
+            query = query.Where(x => x.CreatedAt >= filter.CreatedAfter.Value);
+
+        if (filter.CreatedBefore is not null)
+            query = query.Where(x => x.CreatedAt < filter.CreatedBefore.Value);
+
+        return query;
+    }
+
     // ── Mapping ──────────────────────────────────────────────────────────────
 
     private WorkflowProgress Map(WorkflowInstanceEntity entity)
@@ -79,7 +157,12 @@ public sealed class EfWorkflowQueryService : IWorkflowQueryService
             .ToDictionary(s => s.Index);
 
         // Execution pointers indexed by step index.
-        var pointers = entity.ExecutionPointers.ToDictionary(p => p.StepIndex);
+        // GroupBy rather than ToDictionary so that duplicate StepIndex entries (which
+        // should not occur in normal flow but can if the same instance was somehow
+        // processed concurrently) don't throw — we take the most recent pointer.
+        var pointers = entity.ExecutionPointers
+            .GroupBy(p => p.StepIndex)
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(p => p.StartTime ?? DateTime.MinValue).First());
 
         var steps = new List<StepProgress>();
 

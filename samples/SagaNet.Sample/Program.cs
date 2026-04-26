@@ -1,20 +1,13 @@
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Http;
+using System.Reflection;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using SagaNet.Core.Abstractions;
 using SagaNet.Extensions.DependencyInjection;
 using SagaNet.Persistence.EfCore;
 using SagaNet.Persistence.EfCore.Queries;
 using SagaNet.Persistence.EfCore.Repositories;
+using SagaNet.Core.Abstractions;
 using SagaNet.Sample.Workflows;
 using SagaNet.Sample.Workflows.Steps;
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Host / service registration
-// ──────────────────────────────────────────────────────────────────────────────
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -49,72 +42,40 @@ builder.Services.AddSagaNetQueries<EfWorkflowQueryService>();
 builder.Services.AddHealthChecks()
     .AddSagaNetHealthCheck();
 
+// ── MVC controllers + Swagger ─────────────────────────────────────────────────
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SwaggerDoc("v1", new()
+    {
+        Title       = "SagaNet Sample API",
+        Version     = "v1",
+        Description = "Trigger and inspect OrderWorkflow sagas."
+    });
+
+    // Pull XML doc comments into Swagger UI
+    var xmlFile = $"{Assembly.GetExecutingAssembly().GetName().Name}.xml";
+    var xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
+    if (File.Exists(xmlPath))
+        c.IncludeXmlComments(xmlPath);
+});
+
 var app = builder.Build();
 
 // ── Ensure DB schema ──────────────────────────────────────────────────────────
 using (var scope = app.Services.CreateScope())
     await scope.ServiceProvider.GetRequiredService<SagaNetDbContext>().Database.EnsureCreatedAsync();
 
-// ──────────────────────────────────────────────────────────────────────────────
-// API endpoints
-// ──────────────────────────────────────────────────────────────────────────────
-
-// POST /orders  →  starts a new OrderWorkflow and returns its instanceId
-app.MapPost("/orders", async (
-    PlaceOrderRequest req,
-    IWorkflowHost workflows,
-    CancellationToken ct) =>
+// ── Swagger UI (available in all environments for the sample) ─────────────────
+app.UseSwagger();
+app.UseSwaggerUI(c =>
 {
-    var instanceId = await workflows.StartWorkflowAsync<OrderWorkflow, OrderData>(
-        new OrderData
-        {
-            OrderId       = req.OrderId,
-            Amount        = req.Amount,
-            CustomerEmail = req.CustomerEmail
-        }, ct);
-
-    return Results.Accepted($"/orders/{instanceId}/progress",
-        new { WorkflowInstanceId = instanceId });
+    c.SwaggerEndpoint("/swagger/v1/swagger.json", "SagaNet Sample v1");
+    c.RoutePrefix = string.Empty; // serve at root "/"
 });
 
-// GET /orders/{instanceId}/progress  →  returns live task + step progress
-app.MapGet("/orders/{instanceId:guid}/progress", async (
-    Guid instanceId,
-    IWorkflowQueryService queries,
-    CancellationToken ct) =>
-{
-    var progress = await queries.GetProgressAsync(instanceId, ct);
-    return progress is null
-        ? Results.NotFound(new { error = "Workflow instance not found." })
-        : Results.Ok(progress);
-});
-
-// GET /orders/recent  →  last 20 workflow instances (for admin / dashboard)
-app.MapGet("/orders/recent", async (
-    IWorkflowQueryService queries,
-    CancellationToken ct) =>
-{
-    var recent = await queries.GetRecentAsync(limit: 20, ct);
-    return Results.Ok(recent);
-});
-
-// POST /orders/{instanceId}/terminate  →  cancel a running workflow
-app.MapPost("/orders/{instanceId:guid}/terminate", async (
-    Guid instanceId,
-    IWorkflowHost workflows,
-    CancellationToken ct) =>
-{
-    await workflows.TerminateWorkflowAsync(instanceId, ct);
-    return Results.Ok(new { message = "Workflow terminated." });
-});
-
-// GET /health
+app.MapControllers();
 app.MapHealthChecks("/health");
 
 app.Run();
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Request DTO
-// ──────────────────────────────────────────────────────────────────────────────
-
-record PlaceOrderRequest(string OrderId, decimal Amount, string CustomerEmail);

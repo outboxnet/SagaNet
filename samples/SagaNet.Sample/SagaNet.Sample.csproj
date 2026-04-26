@@ -4,6 +4,8 @@
     <TargetFramework>net8.0</TargetFramework>
     <OutputType>Exe</OutputType>
     <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -12,6 +14,7 @@
     <ProjectReference Include="..\..\src\SagaNet.Extensions.DependencyInjection\SagaNet.Extensions.DependencyInjection.csproj" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" />
+    <PackageReference Include="Swashbuckle.AspNetCore" />
   </ItemGroup>
 
 </Project>

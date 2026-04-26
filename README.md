@@ -19,11 +19,12 @@ A .NET library for running **workflows** and **sagas** — reliable, step-by-ste
 5. [Getting started](#5-getting-started)
 6. [Defining steps](#6-defining-steps)
 7. [Defining a workflow](#7-defining-a-workflow)
-8. [Waiting for an external event](#8-waiting-for-an-external-event)
-9. [Configuring retry behaviour](#9-configuring-retry-behaviour)
-10. [Observability — logs, traces, metrics](#10-observability--logs-traces-metrics)
-11. [Configuration reference](#11-configuration-reference)
-12. [Project structure](#12-project-structure)
+8. [What should be a separate step?](#8-what-should-be-a-separate-step)
+9. [Waiting for an external event](#9-waiting-for-an-external-event)
+10. [Configuring retry behaviour](#10-configuring-retry-behaviour)
+11. [Observability — logs, traces, metrics](#11-observability--logs-traces-metrics)
+12. [Configuration reference](#12-configuration-reference)
+13. [Project structure](#13-project-structure)
 
 ---
 
@@ -394,7 +395,94 @@ public class OrderWorkflow : IWorkflow<OrderData>
 
 ---
 
-## 8. Waiting for an external event
+## 8. What should be a separate step?
+
+This is the most important design question when building workflows. Getting it right keeps your workflow clear, resilient, and observable. Getting it wrong creates either a tangled mess of tiny classes or a single monolithic step that defeats the purpose of the engine.
+
+### Make it a separate step when…
+
+**It calls an external system.**  
+Anything that crosses a network boundary — a database write, an HTTP call, a queue message, a third-party API — should be its own step. Each of these can fail independently and benefits from retry and compensation logic.
+
+```
+✓ ChargePaymentStep     ← calls payment gateway
+✓ SendEmailStep         ← calls email provider
+✓ UpdateInventoryStep   ← writes to a separate service
+✓ PublishOrderEventStep ← writes to a message bus
+```
+
+**It has a meaningful undo action.**  
+If the work done by a step needs to be reversed when something later fails, it must be its own step so you can attach a `CompensateWith<>`. A step that does three things can only be rolled back as a whole unit — and that is often too coarse.
+
+```
+✓ ReserveInventoryStep + CompensateWith — can release the reservation independently
+✓ ChargeCardStep + CompensateWith       — can issue a refund independently
+```
+
+**It can fail in a way that is independent of the other steps.**  
+If failure here does not imply failure everywhere, it should be separate so that SagaNet can retry just that step without re-running what already succeeded.
+
+**It is a meaningful progress milestone.**  
+If someone looking at a dashboard would care whether this specific thing has happened yet, make it a step. Each step has its own status visible in the progress API — `Pending`, `Running`, `Complete`, `Failed`. You get observability for free.
+
+```
+✓ "Has the payment been charged yet?"   ← ProcessPaymentStep
+✓ "Has the parcel been dispatched yet?" ← ShipOrderStep
+```
+
+**It can take a long time or needs to pause.**  
+Long-running work and anything that waits for an external event (`WaitForEvent`) must be its own step, because the workflow engine suspends and resumes at step boundaries.
+
+---
+
+### Do NOT make it a separate step when…
+
+**It is a pure in-memory calculation with no side effects.**  
+If it only reads and transforms data already in `context.Data`, it belongs inside the same step as the work that uses its result — not as its own step.
+
+```
+✗ CalculateDiscountStep   ← just math on existing data, no I/O
+✗ BuildEmailBodyStep      ← just string formatting
+✗ SetStatusFlagStep       ← just sets context.Data.SomeFlag = true
+```
+
+**It always succeeds and can never be compensated.**  
+A step with no retry benefit, no compensation action, and no failure mode is just code. Put it in the `RunAsync` of the step it logically belongs to.
+
+**It is too granular to be meaningful on a dashboard.**  
+If no one will ever ask "is this specific thing done yet?", the granularity is probably too fine. Steps have overhead — a DB read and write per execution. Don't pay that cost for work that finishes in microseconds and never fails.
+
+**It must share a database transaction with the previous step.**  
+SagaNet commits between steps. If two operations must be atomic (either both happen or neither does), they must live in the same step and share a single `DbContext` transaction.
+
+```
+✗ separate steps for InsertOrder + InsertOrderLines
+  ← these should be one step that writes both in one transaction
+```
+
+---
+
+### The rule of thumb
+
+> **One step = one side effect on one external system.**
+
+If a step calls two external systems, split it. If a step does pure logic with no I/O, fold it into its neighbour. If you are unsure whether a failure here would require a different retry or compensation strategy than the surrounding code, that is a signal to split.
+
+**Example — order workflow redesigned:**
+
+| Step | Separate? | Why |
+|---|---|---|
+| Parse and validate request fields | No | Pure logic, no I/O, always succeeds |
+| Write order record to database | Yes | External I/O, can fail, needs compensation (delete) |
+| Reserve inventory | Yes | External service, independent failure, needs compensation (release) |
+| Calculate shipping cost | No | Pure calculation on already-loaded data |
+| Charge payment | Yes | External service, independent failure, needs compensation (refund) |
+| Send confirmation email | Yes | External service, independent failure (but no compensation needed — email already sent) |
+| Ship order | Yes | External service, final action, progress milestone |
+
+---
+
+## 9. Waiting for an external event
 
 Some workflows need to pause and wait for something to happen outside your application — a payment webhook, a human approval, a delivery confirmation.
 
@@ -429,7 +517,7 @@ SagaNet wakes up the waiting workflow and resumes from the next step.
 
 ---
 
-## 9. Configuring retry behaviour
+## 10. Configuring retry behaviour
 
 By default, SagaNet retries any step that throws an unhandled exception. You can configure this globally or per step.
 
@@ -470,7 +558,7 @@ When a step **returns `ExecutionResult.Retry(delay)` itself**, it bypasses the e
 
 ---
 
-## 10. Observability — logs, traces, metrics
+## 11. Observability — logs, traces, metrics
 
 SagaNet emits structured logs, OpenTelemetry traces, and metrics automatically.
 
@@ -524,7 +612,7 @@ Reports `Healthy` when the background host is running, `Degraded` if it has stop
 
 ---
 
-## 11. Configuration reference
+## 12. Configuration reference
 
 All options live under the `"SagaNet"` section in `appsettings.json`, or set programmatically.
 
@@ -552,7 +640,7 @@ All options live under the `"SagaNet"` section in `appsettings.json`, or set pro
 
 ---
 
-## 12. Project structure
+## 13. Project structure
 
 ```
 SagaNet/

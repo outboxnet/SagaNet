@@ -102,3 +102,9 @@ D:\SagaNet\samples\SagaNet.Sample\obj\Debug\net8.0\staticwebassets.build.json.ca
 D:\SagaNet\samples\SagaNet.Sample\obj\Debug\net8.0\staticwebassets.development.json
 D:\SagaNet\samples\SagaNet.Sample\obj\Debug\net8.0\staticwebassets.build.endpoints.json
 D:\SagaNet\samples\SagaNet.Sample\obj\Debug\net8.0\swae.build.ex.cache
+D:\SagaNet\samples\SagaNet.Sample\bin\Debug\net8.0\Microsoft.OpenApi.dll
+D:\SagaNet\samples\SagaNet.Sample\bin\Debug\net8.0\Swashbuckle.AspNetCore.Swagger.dll
+D:\SagaNet\samples\SagaNet.Sample\bin\Debug\net8.0\Swashbuckle.AspNetCore.SwaggerGen.dll
+D:\SagaNet\samples\SagaNet.Sample\bin\Debug\net8.0\Swashbuckle.AspNetCore.SwaggerUI.dll
+D:\SagaNet\samples\SagaNet.Sample\obj\Debug\net8.0\SagaNet.Sample.MvcApplicationPartsAssemblyInfo.cs
+D:\SagaNet\samples\SagaNet.Sample\obj\Debug\net8.0\staticwebassets.upToDateCheck.txt
