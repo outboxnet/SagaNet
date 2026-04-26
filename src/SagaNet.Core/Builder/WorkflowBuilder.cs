@@ -45,7 +45,10 @@ public sealed class WorkflowBuilder<TData> : IWorkflowBuilder<TData>
         where TCompensate : IWorkflowStep<TData>
     {
         var index = _steps.Count;
-        var step = new MutableStepDefinition(index, name, typeof(TCompensate));
+        var step = new MutableStepDefinition(index, name, typeof(TCompensate))
+        {
+            IsCompensationStep = true
+        };
         _steps.Add(step);
         return index;
     }
@@ -58,6 +61,7 @@ public sealed class WorkflowBuilder<TData> : IWorkflowBuilder<TData>
             Name = s.Name,
             StepType = s.StepType,
             IsCompensatable = typeof(ICompensatableStep<TData>).IsAssignableFrom(s.StepType),
+            IsCompensationStep = s.IsCompensationStep,
             CompensateWithStepIndex = s.CompensateWithStepIndex,
             RetryPolicy = s.RetryPolicy,
             NextStepIndices = s.NextStepIndices.AsReadOnly(),
@@ -82,5 +86,6 @@ public sealed class WorkflowBuilder<TData> : IWorkflowBuilder<TData>
         public int? CompensateWithStepIndex { get; set; }
         public RetryPolicy? RetryPolicy { get; set; }
         public string? Description { get; set; }
+        public bool IsCompensationStep { get; set; }
     }
 }

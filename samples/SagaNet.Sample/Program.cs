@@ -1,3 +1,5 @@
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -5,101 +7,114 @@ using Microsoft.Extensions.Logging;
 using SagaNet.Core.Abstractions;
 using SagaNet.Extensions.DependencyInjection;
 using SagaNet.Persistence.EfCore;
+using SagaNet.Persistence.EfCore.Queries;
 using SagaNet.Persistence.EfCore.Repositories;
 using SagaNet.Sample.Workflows;
 using SagaNet.Sample.Workflows.Steps;
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Host setup
+// Host / service registration
 // ──────────────────────────────────────────────────────────────────────────────
 
-var host = Host.CreateDefaultBuilder(args)
-    .ConfigureLogging(logging =>
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Logging.SetMinimumLevel(LogLevel.Debug);
+
+// ── Persistence (InMemory for zero-setup demo; swap for UseSqlServer in prod) ─
+builder.Services.AddDbContext<SagaNetDbContext>(opt =>
+    opt.UseInMemoryDatabase("SagaNetSample"));
+
+builder.Services.AddScoped<IWorkflowRepository, EfWorkflowRepository>();
+
+// ── Register step classes (DI injects ILogger etc. into them) ────────────────
+builder.Services.AddTransient<ValidateOrderStep>();
+builder.Services.AddTransient<ReserveInventoryStep>();
+builder.Services.AddTransient<ProcessPaymentStep>();
+builder.Services.AddTransient<ShipOrderStep>();
+
+// ── SagaNet engine ────────────────────────────────────────────────────────────
+builder.Services.AddSagaNet(b => b
+    .AddWorkflow<OrderWorkflow, OrderData>()
+    .Configure(opt =>
     {
-        logging.ClearProviders();
-        logging.AddConsole();
-        logging.SetMinimumLevel(LogLevel.Debug);
-    })
-    .ConfigureServices((ctx, services) =>
-    {
-        // ── Persistence ──────────────────────────────────────────────────────
-        // In a real app, use a real SQL Server connection string.
-        // For the sample we use InMemory EF provider for zero-setup running.
-        services.AddDbContext<SagaNetDbContext>(opt =>
-            opt.UseInMemoryDatabase("SagaNetSample"));
+        opt.PollInterval           = TimeSpan.FromMilliseconds(200);
+        opt.PollBatchSize          = 5;
+        opt.MaxConcurrentWorkflows = 4;
+    }));
 
-        services.AddScoped<IWorkflowRepository, EfWorkflowRepository>();
+// ── Task progress query service ───────────────────────────────────────────────
+builder.Services.AddSagaNetQueries<EfWorkflowQueryService>();
 
-        // ── Workflow steps (register so DI injects ILogger etc.) ─────────────
-        services.AddTransient<ValidateOrderStep>();
-        services.AddTransient<ReserveInventoryStep>();
-        services.AddTransient<ProcessPaymentStep>();
-        services.AddTransient<ShipOrderStep>();
+// ── Health checks ─────────────────────────────────────────────────────────────
+builder.Services.AddHealthChecks()
+    .AddSagaNetHealthCheck();
 
-        // ── SagaNet engine ───────────────────────────────────────────────────
-        services.AddSagaNet(builder =>
+var app = builder.Build();
+
+// ── Ensure DB schema ──────────────────────────────────────────────────────────
+using (var scope = app.Services.CreateScope())
+    await scope.ServiceProvider.GetRequiredService<SagaNetDbContext>().Database.EnsureCreatedAsync();
+
+// ──────────────────────────────────────────────────────────────────────────────
+// API endpoints
+// ──────────────────────────────────────────────────────────────────────────────
+
+// POST /orders  →  starts a new OrderWorkflow and returns its instanceId
+app.MapPost("/orders", async (
+    PlaceOrderRequest req,
+    IWorkflowHost workflows,
+    CancellationToken ct) =>
+{
+    var instanceId = await workflows.StartWorkflowAsync<OrderWorkflow, OrderData>(
+        new OrderData
         {
-            builder
-                .AddWorkflow<OrderWorkflow, OrderData>()
-                .Configure(opt =>
-                {
-                    opt.PollInterval = TimeSpan.FromMilliseconds(200);
-                    opt.PollBatchSize = 5;
-                    opt.MaxConcurrentWorkflows = 4;
-                });
-        });
+            OrderId       = req.OrderId,
+            Amount        = req.Amount,
+            CustomerEmail = req.CustomerEmail
+        }, ct);
 
-        // ── Health checks ────────────────────────────────────────────────────
-        services.AddHealthChecks()
-            .AddSagaNetHealthCheck();
-    })
-    .Build();
+    return Results.Accepted($"/orders/{instanceId}/progress",
+        new { WorkflowInstanceId = instanceId });
+});
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Ensure DB schema exists (InMemory doesn't need it, but illustrates the call)
-// ──────────────────────────────────────────────────────────────────────────────
-using (var scope = host.Services.CreateScope())
+// GET /orders/{instanceId}/progress  →  returns live task + step progress
+app.MapGet("/orders/{instanceId:guid}/progress", async (
+    Guid instanceId,
+    IWorkflowQueryService queries,
+    CancellationToken ct) =>
 {
-    await scope.ServiceProvider.GetRequiredService<SagaNetDbContext>()
-        .Database.EnsureCreatedAsync();
-}
+    var progress = await queries.GetProgressAsync(instanceId, ct);
+    return progress is null
+        ? Results.NotFound(new { error = "Workflow instance not found." })
+        : Results.Ok(progress);
+});
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Start the host (starts WorkflowHost in the background)
-// ──────────────────────────────────────────────────────────────────────────────
-await host.StartAsync();
-
-var logger = host.Services.GetRequiredService<ILogger<Program>>();
-var workflowHost = host.Services.GetRequiredService<IWorkflowHost>();
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Demo: start a successful order
-// ──────────────────────────────────────────────────────────────────────────────
-logger.LogInformation("=== Starting successful order workflow ===");
-
-var successId = await workflowHost.StartWorkflowAsync<OrderWorkflow, OrderData>(
-    new OrderData
-    {
-        OrderId = "ORD-001",
-        Amount = 149.99m,
-        CustomerEmail = "customer@example.com"
-    });
-
-logger.LogInformation("Workflow started: {InstanceId}", successId);
-
-await Task.Delay(3000); // let it run
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Demo: check result via repository
-// ──────────────────────────────────────────────────────────────────────────────
-using (var scope = host.Services.CreateScope())
+// GET /orders/recent  →  last 20 workflow instances (for admin / dashboard)
+app.MapGet("/orders/recent", async (
+    IWorkflowQueryService queries,
+    CancellationToken ct) =>
 {
-    var repo = scope.ServiceProvider.GetRequiredService<IWorkflowRepository>();
-    var instance = await repo.GetInstanceAsync(successId);
-    logger.LogInformation(
-        "Order workflow status: {Status} | Shipped: {Shipped}",
-        instance?.Status,
-        System.Text.Json.JsonSerializer.Deserialize<OrderData>(instance?.DataJson ?? "{}")?.Shipped);
-}
+    var recent = await queries.GetRecentAsync(limit: 20, ct);
+    return Results.Ok(recent);
+});
 
-await host.StopAsync();
+// POST /orders/{instanceId}/terminate  →  cancel a running workflow
+app.MapPost("/orders/{instanceId:guid}/terminate", async (
+    Guid instanceId,
+    IWorkflowHost workflows,
+    CancellationToken ct) =>
+{
+    await workflows.TerminateWorkflowAsync(instanceId, ct);
+    return Results.Ok(new { message = "Workflow terminated." });
+});
+
+// GET /health
+app.MapHealthChecks("/health");
+
+app.Run();
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Request DTO
+// ──────────────────────────────────────────────────────────────────────────────
+
+record PlaceOrderRequest(string OrderId, decimal Amount, string CustomerEmail);

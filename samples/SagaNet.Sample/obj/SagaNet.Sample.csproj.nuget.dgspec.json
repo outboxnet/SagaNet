@@ -61,19 +61,9 @@
         "net8.0": {
           "targetAlias": "net8.0",
           "dependencies": {
-            "Microsoft.EntityFrameworkCore.Design": {
-              "target": "Package",
-              "version": "[8.0.10, )",
-              "versionCentrallyManaged": true
-            },
             "Microsoft.EntityFrameworkCore.InMemory": {
               "target": "Package",
               "version": "[8.0.10, )",
-              "versionCentrallyManaged": true
-            },
-            "Microsoft.Extensions.Hosting": {
-              "target": "Package",
-              "version": "[8.0.1, )",
               "versionCentrallyManaged": true
             },
             "Microsoft.Extensions.Logging.Abstractions": {
@@ -120,6 +110,9 @@
           "assetTargetFallback": true,
           "warn": true,
           "frameworkReferences": {
+            "Microsoft.AspNetCore.App": {
+              "privateAssets": "none"
+            },
             "Microsoft.NETCore.App": {
               "privateAssets": "all"
             }

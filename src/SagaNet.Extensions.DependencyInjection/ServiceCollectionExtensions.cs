@@ -77,6 +77,24 @@ public static class ServiceCollectionExtensions
     }
 
     /// <summary>
+    /// Registers <see cref="IWorkflowQueryService"/> using the provided EF Core implementation type.
+    /// Call this after <see cref="AddSagaNet"/> when using the EF Core persistence package.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// services.AddSagaNet(...);
+    /// services.AddSagaNetQueries&lt;EfWorkflowQueryService&gt;();
+    /// </code>
+    /// </example>
+    public static IServiceCollection AddSagaNetQueries<TQueryService>(
+        this IServiceCollection services)
+        where TQueryService : class, Core.Abstractions.IWorkflowQueryService
+    {
+        services.TryAddScoped<Core.Abstractions.IWorkflowQueryService, TQueryService>();
+        return services;
+    }
+
+    /// <summary>
     /// Adds a SagaNet health check that reports Healthy when the host is running.
     /// </summary>
     public static IHealthChecksBuilder AddSagaNetHealthCheck(

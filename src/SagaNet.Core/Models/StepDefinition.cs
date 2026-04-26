@@ -30,6 +30,12 @@ public sealed class StepDefinition
 
     /// <summary>Optional human-readable description.</summary>
     public string? Description { get; init; }
+
+    /// <summary>
+    /// True for compensation-only steps (added via <c>CompensateWith&lt;&gt;()</c>).
+    /// These are hidden from normal progress display and only shown when actively compensating.
+    /// </summary>
+    public bool IsCompensationStep { get; init; }
 }
 
 /// <summary>Per-step retry configuration.</summary>
