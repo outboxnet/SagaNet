@@ -51,6 +51,15 @@ This document explains how SagaNet works **behind the scenes**, from the moment 
 15. [Observability — logs, traces, metrics](#15-observability--logs-traces-metrics)
 16. [Complete data-flow walkthrough](#16-complete-data-flow-walkthrough)
 17. [Key design decisions and trade-offs](#17-key-design-decisions-and-trade-offs)
+18. [Atomicity, idempotency, and what can go wrong](#18-atomicity-idempotency-and-what-can-go-wrong)
+    - [The two database saves per tick](#the-two-database-saves-per-tick)
+    - [The crash window and what happens inside it](#the-crash-window-and-what-happens-inside-it)
+    - [At-least-once execution: the fundamental guarantee](#at-least-once-execution-the-fundamental-guarantee)
+    - [What does and does not need to be idempotent](#what-does-and-does-not-need-to-be-idempotent)
+    - [How to make a step idempotent in practice](#how-to-make-a-step-idempotent-in-practice)
+    - [Compensation and idempotency](#compensation-and-idempotency)
+    - [The stuck-Running problem](#the-stuck-running-problem)
+    - [What SagaNet does NOT solve](#what-saganet-does-not-solve)
 
 ---
 
@@ -1193,3 +1202,360 @@ The in-flight `ConcurrentDictionary` in `WorkflowHost` prevents two workers on t
 **Why two layers**: the in-flight dictionary is faster (in-memory, no DB round-trip) and works with any database provider including InMemory. The RowVersion is the authoritative distributed lock for multi-host scenarios.
 
 **Trade-off**: if an application crashes while a workflow is in-flight, the in-flight entry is lost (it's in-memory). The `RowVersion` ensures the DB row ends up in `Status=Running` with no further updates — a monitoring tool or restart will detect and recover it. An optional `StuckWorkflowRecovery` background task could periodically set old `Running` instances back to `Runnable`.
+
+---
+
+## 18. Atomicity, idempotency, and what can go wrong
+
+This is the most important section for production use. It explains exactly what SagaNet guarantees, what it does not guarantee, and what you must do yourself to build a correct system.
+
+### The two database saves per tick
+
+Every tick of `WorkflowExecutor` performs exactly **two** separate database `SaveChanges` calls:
+
+```
+Save 1 — TryAcquireInstanceAsync
+  ┌─────────────────────────────────────────────────────┐
+  │ UPDATE WorkflowInstances SET Status = Running        │  ← committed to DB
+  │ WHERE Id = @id AND RowVersion = @version             │
+  └─────────────────────────────────────────────────────┘
+
+        ← YOUR STEP RUNS HERE (calls external systems) →
+
+Save 2 — UpdateInstanceAsync
+  ┌─────────────────────────────────────────────────────┐
+  │ UPDATE WorkflowInstances SET Status = Runnable, ...  │  ← committed to DB
+  │ UPDATE ExecutionPointers SET Status = Complete, ...  │
+  └─────────────────────────────────────────────────────┘
+```
+
+The step's work and the DB update are **not in the same transaction**. They cannot be — your step calls an external HTTP service or another database, and you cannot hold an open SQL transaction across a network call without poisoning your connection pool and creating distributed deadlocks.
+
+This is not a bug or oversight. It is the fundamental architecture of every saga-based workflow engine. Distributed transactions (2PC) would "solve" this at enormous operational cost, and are not viable across external systems like payment gateways or third-party APIs anyway. The saga pattern is the accepted alternative.
+
+### The crash window and what happens inside it
+
+```
+Timeline:
+
+T1  ─── Save 1: Status=Running committed to DB ──────────────────────────────
+T2  ─── Step begins: HTTP call to payment gateway ────────────────────────────
+T3  ─── Payment gateway responds: "Charge accepted, txId=TXN-999" ────────────
+T4  ─── Save 2: Status=Runnable, pointer=Complete ────────────────────────────
+         ↑ if the process dies anywhere between T1 and T4,
+           the external call may have happened but the DB doesn't know it
+```
+
+**What is in the DB if the app crashes at T3 (after the charge, before Save 2)?**
+
+```
+WorkflowInstances: Status = Running   ← stuck, poller only looks for Runnable
+ExecutionPointers: pointer for ProcessPayment still shows Pending
+                   (or not yet in DB at all if this was the first tick)
+```
+
+The workflow is now stuck. The charge happened. The DB doesn't reflect it.
+
+**What happens on restart?**
+
+Nothing automatically. The poller queries `WHERE Status = Runnable`. This instance has `Status = Running`. It will never be picked up again unless something resets it. This is the **stuck-Running problem** (covered in detail below).
+
+If you do implement a recovery mechanism that resets `Running → Runnable`, the step will run again. The payment gateway will be called a second time. **If your step is not idempotent, you will double-charge the customer.**
+
+### At-least-once execution: the fundamental guarantee
+
+SagaNet guarantees **at-least-once** execution of each step — meaning every step that runs will run to DB-confirmed completion eventually, but it may run more than once.
+
+It does **not** guarantee **exactly-once** execution — that would require the step's external effect and the DB save to be in a single atomic transaction, which is impossible across process boundaries.
+
+This is the same guarantee provided by message queues (Kafka, RabbitMQ, Azure Service Bus), background job systems (Hangfire, Quartz), and every other distributed coordination system.
+
+The implication:
+
+> **Any step that touches the outside world must be written so that running it twice produces the same result as running it once.**
+
+This property is called **idempotency**.
+
+### What does and does not need to be idempotent
+
+#### Steps that MUST be idempotent
+
+These can be called more than once:
+
+| Step type | Why |
+|---|---|
+| Calls an HTTP API that creates something (POST) | Network timeout after server accepted → retry creates it again |
+| Writes to an external database | App crash after write, before Save 2 → retry writes again |
+| Sends an email or SMS | Crash after send, before Save 2 → retry sends again |
+| Publishes a message to a queue | Crash after publish, before Save 2 → retry publishes again |
+| `CompensateAsync` of any step | Compensation runs in-memory, then saves all at once — crash mid-compensation means compensations run again |
+
+#### Steps that do NOT need to be idempotent
+
+These are safe to repeat by nature:
+
+| Step type | Why |
+|---|---|
+| Pure reads (SELECT, GET) | Reading twice returns the same data |
+| In-memory calculations | No external side effect |
+| Calls an HTTP API that is already idempotent by design (PUT, DELETE with a unique ID) | The server handles it |
+| Validation steps with no side effects | Pure logic |
+
+#### The `CompensateAsync` rule
+
+Every `CompensateAsync` implementation must also be idempotent. Here is why:
+
+```
+Compensation flow in SagaCompensator.CompensateAsync:
+
+for each completed step (in reverse order):
+    pointer.Status = Compensating          ← in memory only
+    await stepExecutor.CompensateAsync(...)  ← calls external system
+    pointer.Status = Compensated           ← in memory only
+
+return true  ← back to WorkflowExecutor
+
+WorkflowExecutor.finally:
+    await UpdateInstanceAsync(...)         ← ONE Save2 for all compensations
+```
+
+All compensations run in memory, then **one** `SaveChanges` at the end commits the whole compensation batch. If the app crashes after some but not all compensations have run but before that final save:
+
+- The DB still shows all compensated steps as `Complete`
+- On recovery, compensation starts over from the beginning
+- Steps that were already compensated will have their `CompensateAsync` called again
+
+If `CompensateAsync` for `ReserveInventory` releases inventory when inventory is already released, what happens? If the API returns 404, does your code crash? You need to handle that.
+
+### How to make a step idempotent in practice
+
+#### Pattern 1: Idempotency keys
+
+The best approach when calling external APIs. Pass a stable, deterministic key derived from the workflow instance ID. The external system deduplicates on that key.
+
+```csharp
+public async Task<ExecutionResult> RunAsync(StepExecutionContext<OrderData> context)
+{
+    // The idempotency key is stable across retries because instanceId never changes.
+    var idempotencyKey = $"payment-{context.WorkflowInstanceId}";
+
+    var result = await _paymentGateway.ChargeAsync(
+        amount: context.Data.Amount,
+        idempotencyKey: idempotencyKey);  // Stripe, Adyen, etc. support this natively
+
+    context.Data.PaymentTransactionId = result.TransactionId;
+    return ExecutionResult.Next();
+}
+```
+
+If the gateway already processed a charge with that key, it returns the original result instead of charging again.
+
+#### Pattern 2: Check-then-act using PersistenceData
+
+Use `context.PersistenceData` — a `Dictionary<string, string>` that is persisted with the execution pointer and survives retries — to store that the external call already happened.
+
+```csharp
+public async Task<ExecutionResult> RunAsync(StepExecutionContext<OrderData> context)
+{
+    // Was this already done on a previous attempt?
+    if (context.PersistenceData.TryGetValue("txId", out var existingTxId))
+    {
+        // Already charged. Just record the result and move on.
+        context.Data.PaymentTransactionId = existingTxId;
+        return ExecutionResult.Next();
+    }
+
+    var result = await _paymentGateway.ChargeAsync(context.Data.Amount);
+
+    // Store the result before returning — if we crash here, on retry we will
+    // find this key and skip the charge.
+    context.PersistenceData["txId"] = result.TransactionId;
+    context.Data.PaymentTransactionId = result.TransactionId;
+    return ExecutionResult.Next();
+}
+```
+
+**Critical caveat**: `PersistenceData` is saved as part of Save 2 (`UpdateInstanceAsync`). If the app crashes between the charge succeeding and Save 2, `PersistenceData` is not yet written to the DB. On retry, `PersistenceData` will be empty, and the check will not fire. You will charge again. This pattern only prevents duplicates caused by normal retries (`ExecutionResult.Retry`), not crash-then-restart scenarios.
+
+For crash safety, combine this with Pattern 1 (idempotency keys).
+
+#### Pattern 3: Query-before-act
+
+Before doing the work, check if it was already done. Useful when you control the external system.
+
+```csharp
+public async Task<ExecutionResult> RunAsync(StepExecutionContext<OrderData> context)
+{
+    // Check if the reservation already exists.
+    var existing = await _inventory.GetReservationAsync(context.Data.OrderId);
+    if (existing is not null)
+    {
+        // Already reserved on a previous attempt.
+        return ExecutionResult.Next();
+    }
+
+    await _inventory.ReserveAsync(context.Data.OrderId, context.Data.Quantity);
+    return ExecutionResult.Next();
+}
+```
+
+This works when the external system lets you query by your own identifier (the order ID) and the state is stable (a reservation doesn't disappear between the query and the act).
+
+#### Pattern 4: Safe compensation design
+
+Write `CompensateAsync` to be a no-op if the work was never done or was already undone:
+
+```csharp
+public async Task CompensateAsync(StepExecutionContext<OrderData> context)
+{
+    // ReleaseAsync should be safe to call even if the reservation doesn't exist.
+    // The inventory service returns 204 No Content whether it released something or not.
+    await _inventory.ReleaseAsync(context.Data.OrderId);
+}
+```
+
+If you don't control the external system and it returns an error when you try to release something that isn't reserved, catch and swallow that specific error:
+
+```csharp
+public async Task CompensateAsync(StepExecutionContext<OrderData> context)
+{
+    try
+    {
+        await _inventory.ReleaseAsync(context.Data.OrderId);
+    }
+    catch (ReservationNotFoundException)
+    {
+        // Already released or never existed — compensation goal is achieved.
+        _logger.LogInformation("Inventory release was a no-op for {OrderId}", context.Data.OrderId);
+    }
+}
+```
+
+### Compensation and idempotency
+
+Here is the full picture of what compensation guarantees and does not guarantee:
+
+```
+Scenario: 3-step saga, ProcessPayment fails
+
+Forward run:
+  Step 1: ValidateOrder   → Complete   ← no compensation registered
+  Step 2: ReserveInventory → Complete  ← has CompensateAsync
+  Step 3: ProcessPayment  → FAIL
+
+Compensation (SagaCompensator runs):
+  [in memory] pointer[2].Status = Compensating
+  [external]  inventory.Release(orderId)           ← external call 1
+  [in memory] pointer[2].Status = Compensated
+
+  [Save 2] UpdateInstanceAsync:
+    pointer[2].Status = Compensated                ← committed to DB
+    instance.Status   = Compensated                ← committed to DB
+
+What is and is not atomic:
+  ✓ The DB update for ALL compensations is ONE SaveChanges — no partial DB state
+  ✗ The external call and the DB update are NOT atomic
+  ✗ If crash happens after inventory.Release but before Save 2,
+    on restart inventory.Release will be called AGAIN
+    → CompensateAsync MUST be idempotent
+```
+
+### The stuck-Running problem
+
+If the app process is killed (OOM, SIGKILL, power loss) while a step is executing — between Save 1 and Save 2 — the workflow row in the database is stuck with `Status = Running`.
+
+The poll query is `WHERE Status = Runnable`. It will never find `Status = Running`. The workflow will never advance again without manual intervention or an automated recovery job.
+
+**Detecting stuck instances**:
+
+```sql
+-- Workflows that have been Running for more than 10 minutes
+SELECT Id, WorkflowName, CreatedAt, DATEDIFF(MINUTE, CreatedAt, GETUTCDATE()) AS MinutesRunning
+FROM WorkflowInstances
+WHERE Status = 1  -- Running
+  AND CreatedAt < DATEADD(MINUTE, -10, GETUTCDATE())
+```
+
+**Recovering stuck instances** (run periodically, e.g. every 5 minutes):
+
+```sql
+UPDATE WorkflowInstances
+SET Status = 0  -- back to Runnable
+WHERE Status = 1  -- Running
+  AND CreatedAt < DATEADD(MINUTE, -10, GETUTCDATE())
+```
+
+Or implement a `StuckWorkflowRecovery` hosted service in your application:
+
+```csharp
+public class StuckWorkflowRecovery : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromMinutes(5));
+        while (await timer.WaitForNextTickAsync(ct))
+        {
+            await using var scope = _scopeFactory.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<SagaNetDbContext>();
+
+            var stuckCutoff = DateTime.UtcNow.AddMinutes(-10);
+            await db.WorkflowInstances
+                .Where(x => x.Status == (int)WorkflowStatus.Running
+                         && x.CreatedAt < stuckCutoff)
+                .ExecuteUpdateAsync(s =>
+                    s.SetProperty(x => x.Status, (int)WorkflowStatus.Runnable), ct);
+        }
+    }
+}
+```
+
+When a stuck instance is reset to `Runnable`, it will be picked up by the poll loop. The step that was interrupted will run again. **This is why idempotency is not optional — it is required for recovery to be safe.**
+
+The timeout value (10 minutes above) should be longer than your `StepTimeout` configuration so that legitimately long-running steps are not incorrectly recovered.
+
+### What SagaNet does NOT solve
+
+| Problem | What actually solves it |
+|---|---|
+| Exactly-once delivery to an external system | Idempotency keys on the external API |
+| Atomic commit across two databases | Not solvable without 2PC or event sourcing; use the outbox pattern |
+| Exactly-once message publishing | Transactional outbox + deduplication on the consumer |
+| Compensation for steps with no undo | Manual intervention — SagaNet marks the workflow `Failed` |
+| Recovery of crashed-Running instances | Your own recovery job (see above) |
+| Ordering guarantees across concurrent workflows | Application-level locking or serialized processing |
+
+#### The outbox pattern (for DB writes + message publishes)
+
+If a step both writes to your database and publishes a message, and you need them to be atomic:
+
+```
+WITHOUT outbox (wrong):
+  step.RunAsync:
+    await yourDb.SaveOrderAsync(order)     ← DB write succeeds
+    await messageBus.PublishAsync(event)   ← crash here → message never published
+    return ExecutionResult.Next()
+
+WITH outbox (correct):
+  step.RunAsync:
+    await yourDb.SaveOrderAsync(order)
+    await yourDb.SaveOutboxMessageAsync(event)  ← both in ONE transaction
+    return ExecutionResult.Next()
+
+  Separate outbox processor (polls yourDb.OutboxMessages):
+    publishes messages and marks them sent
+```
+
+The step itself becomes idempotent because the `SaveOrderAsync` call can check if the order exists before inserting.
+
+#### Summary table
+
+| Component | Needs to be idempotent? | Why |
+|---|---|---|
+| Step calling external HTTP (POST/write) | **Yes** | At-least-once execution |
+| Step calling external HTTP (GET/read only) | No | Reads are inherently safe to repeat |
+| Step writing to your own database | **Yes** | Same as external — at-least-once |
+| Step that only transforms `context.Data` | No | Pure in-memory, no side effect |
+| Step that validates inputs and returns Next or Fail | No | Pure logic |
+| `CompensateAsync` calling external system | **Yes** | Compensation batch may replay on crash |
+| `CompensateAsync` calling read-only API | No | Safe to repeat |
+| `StartWorkflowAsync` | No | Guaranteed by caller (you decide when to call it) |
