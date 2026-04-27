@@ -35,5 +35,8 @@
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageVersion Include="Microsoft.EntityFrameworkCore.InMemory" Version="8.0.10" />
     <PackageVersion Include="coverlet.collector" Version="6.0.2" />
+
+    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="8.0.0" />
+
   </ItemGroup>
 </Project>
