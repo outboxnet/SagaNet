@@ -9,12 +9,12 @@
 
     <!-- NuGet package metadata (shared across all src projects) -->
     <Version>1.0.0</Version>
-    <Authors>SagaNet Contributors</Authors>
-    <Company>SagaNet</Company>
-    <Copyright>Copyright (c) 2026 SagaNet Contributors</Copyright>
+    <Authors>Lőrinc Sándor</Authors>
+    <Company>Dragonfire</Company>
+    <Copyright>Copyright (c) Lőrinc Sándor</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/outboxnet/SagaNet</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/outboxnet/SagaNet.git</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/outboxnet/Dragonfire</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/outboxnet/Dragonfire.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>

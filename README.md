@@ -1,5 +1,7 @@
 # SagaNet
 
+> **This package has moved.** The Dragonfire suite is now developed in a single repository: [`outboxnet/Dragonfire`](https://github.com/outboxnet/Dragonfire). Visit it for the latest version and the full suite of packages.
+
 A .NET library for running **workflows** and **sagas** — reliable, step-by-step business processes that survive crashes, retries, and partial failures.
 
 ---
